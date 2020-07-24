@@ -1,5 +1,6 @@
 package com.wcj.v1.servlet;
 
+import com.wcj.v1.annotations.WCJAutowired;
 import com.wcj.v1.annotations.WCJController;
 import com.wcj.v1.annotations.WCJRequestMapping;
 import com.wcj.v1.annotations.WCJService;
@@ -13,6 +14,7 @@ import javax.servlet.http.HttpServletResponse;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.net.URL;
@@ -55,16 +57,20 @@ public class WCJDispatcherServlet extends HttpServlet {
 
     @Override
     public void init(ServletConfig config) {
-        //1.读取配置文件
-        doReadProperties(config.getInitParameter("contextConfigLocation"));
-        //2.扫描包下的所有类
-        doScannerPackage(properties.getProperty("scan-package"));
-        //3.初始化IOC容器,将扫描的类保存至IOC容器
-        doInitIOCLoadClass();
-        //4.进行DI操作，扫描IOC容器中的实例，将没有复制赋值对象进行赋值
-        doDI();
-        //5.初始化HandlerMapping，完成method和url一对一映射
-        doInitHandlerMapping();
+        try {
+            //1.读取配置文件
+            doReadProperties(config.getInitParameter("contextConfigLocation"));
+            //2.扫描包下的所有类
+            doScannerPackage(properties.getProperty("scan-package"));
+            //3.初始化IOC容器,将扫描的类保存至IOC容器
+            doInitIOCLoadClass();
+            //4.进行DI操作，扫描IOC容器中的实例，将没有复制赋值对象进行赋值
+            doDI();
+            //5.初始化HandlerMapping，完成method和url一对一映射
+            doInitHandlerMapping();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 
     private void doInitIOCLoadClass() {
@@ -132,9 +138,23 @@ public class WCJDispatcherServlet extends HttpServlet {
         }
     }
 
-    private void doDI() {
+    private void doDI() throws IllegalAccessException {
         if (!ioc.isEmpty()) {
-
+            for (Map.Entry<String, Object> entry : ioc.entrySet()) {
+                //获取IOC容器中的被WCJAutowired修饰的所有字段
+                for (Field field : entry.getValue().getClass().getDeclaredFields()) {
+                    if (field.isAnnotationPresent(WCJAutowired.class)) {
+                        String beanName = field.getAnnotation(WCJAutowired.class).value();
+                        if (StringUtils.isEmpty(beanName)) {
+                            //为空则获取字段的类型
+                            beanName = field.getType().getName();
+                        }
+                        field.setAccessible(true);
+                        field.set(entry.getValue(), ioc.get(beanName));
+                        System.out.println("field DI:" + entry.getValue() + ":" + beanName);
+                    }
+                }
+            }
         }
     }
 
@@ -152,7 +172,7 @@ public class WCJDispatcherServlet extends HttpServlet {
                 if (!f.getName().endsWith(".class"))
                     continue;
                 className.add(f.getName());
-                System.out.println("className:" + f.getName());
+                System.out.println("ScannerPackage className:" + f.getName());
             }
         }
     }
