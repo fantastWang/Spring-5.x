@@ -1,9 +1,6 @@
 package com.wcj.v1.servlet;
 
-import com.wcj.v1.annotations.WCJAutowired;
-import com.wcj.v1.annotations.WCJController;
-import com.wcj.v1.annotations.WCJRequestMapping;
-import com.wcj.v1.annotations.WCJService;
+import com.wcj.v1.annotations.*;
 import org.apache.commons.lang3.StringUtils;
 
 import javax.servlet.ServletConfig;
@@ -14,6 +11,7 @@ import javax.servlet.http.HttpServletResponse;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.annotation.Annotation;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
@@ -33,25 +31,17 @@ public class WCJDispatcherServlet extends HttpServlet {
 
     @Override
     protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
-        super.doPost(req, resp);
+        this.doPost(req, resp);
     }
 
     @Override
     protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
-        //6.根据请求url，查找HandlerMapping中与之一一对应的method
+        //6.根据请求url，调用HandlerMapping中对应的method
         try {
             doDispatcher(req, resp);
         } catch (Exception e) {
             resp.getWriter().println("500");
             e.printStackTrace();
-        }
-    }
-
-    private void doDispatcher(HttpServletRequest req, HttpServletResponse resp) throws InvocationTargetException, IllegalAccessException {
-        String requestURI = req.getRequestURI().replaceAll("/+", "/");
-        if (!handlerMapping.isEmpty()) {
-            Method method = handlerMapping.get(requestURI);
-            method.invoke(null, null);
         }
     }
 
@@ -73,42 +63,77 @@ public class WCJDispatcherServlet extends HttpServlet {
         }
     }
 
-    private void doInitIOCLoadClass() {
-        if (className.isEmpty())
+    private void doDispatcher(HttpServletRequest req, HttpServletResponse resp) throws InvocationTargetException, IllegalAccessException, IOException {
+        String requestURI = req.getRequestURI().replaceAll("/+", "/");
+        //如果HandlerMapping为空，或者不存在请求的url
+        if (handlerMapping.isEmpty() || !handlerMapping.containsKey(requestURI)) {
+            resp.getWriter().println("404，请求地址有误");
             return;
-        try {
-            //将扫描的类初始化，保存到IOC容器，并不是所有类都交由Spring管理，只有Controller，Service
-            for (String clz : className) {
-                Class<?> clazz = Class.forName(clz);
-                //被Controller标记的
-                if (clazz.isAnnotationPresent(WCJController.class)) {
-                    Object instance = clazz.newInstance();
-                    String simpleName = this.toLowerCase(clazz.getSimpleName());
-                    ioc.put(simpleName, instance);
-                    System.out.println("controller ioc:" + simpleName + ":" + instance);
-                }
-                //被Service标记的
-                else if (clazz.isAnnotationPresent(WCJService.class)) {
-                    //处理可能在不同包下出现相同的类名，根据@Service("")中的名字区分
-                    String beanName = clazz.getAnnotation(WCJService.class).value();
-                    if (StringUtils.isEmpty(beanName)) {
-                        beanName = toLowerCase(clazz.getSimpleName());
-                    }
-                    Object instance = clazz.newInstance();
-                    ioc.put(beanName, instance);
-                    System.out.println("service ioc:" + beanName + ":" + instance);
-                    //如果接口中有多个实现类，只加载其中一个
-                    for (Class interfaces : clazz.getInterfaces()) {
-                        if (ioc.containsKey(interfaces.getName())) {
-                            continue;
+        } else {
+            Method method = handlerMapping.get(requestURI);
+            Map<String, String[]> params = req.getParameterMap();
+            //获取形参列表
+            Class<?>[] parameterTypes = method.getParameterTypes();
+            Object[] paramValues = new Object[parameterTypes.length];
+            for (int i = 0; i < parameterTypes.length; i++) {
+                Class paramterType = parameterTypes[i];
+                if (paramterType == HttpServletResponse.class) {
+                    paramValues[i] = resp;
+                } else if (paramterType == String.class) {
+                    //通过运行时的状态去拿到你
+                    Annotation[][] pa = method.getParameterAnnotations();
+                    for (int j = 0; j < pa.length; j++) {
+                        for (Annotation a : pa[i]) {
+                            if (a instanceof WCJRequestParam) {
+                                String paramName = ((WCJRequestParam) a).value();
+                                if (!"".equals(paramName.trim())) {
+                                    String value = Arrays.toString(params.get(paramName)).replaceAll("\\[|\\]", "").replaceAll("\\s+", ",");
+                                    paramValues[i] = value;
+                                }
+                            }
                         }
-                        ioc.put(interfaces.getName(), instance);
-                        System.out.println("service interface ioc:" + interfaces.getName() + ":" + instance);
                     }
                 }
             }
-        } catch (Exception e) {
-            e.printStackTrace();
+            //根据实例去进行反射调用方法
+            String beanName = toLowerCase(method.getDeclaringClass().getSimpleName());
+            method.invoke(ioc.get(beanName), paramValues);
+        }
+    }
+
+    private void doInitIOCLoadClass() {
+        if (!className.isEmpty()) {
+            try {
+                //将扫描的类初始化，保存到IOC容器，并不是所有类都交由Spring管理，只有Controller，Service
+                for (String clz : className) {
+                    Class<?> clazz = Class.forName(clz);
+                    //被Controller标记的
+                    if (clazz.isAnnotationPresent(WCJController.class)) {
+                        Object instance = clazz.newInstance();
+                        String simpleName = this.toLowerCase(clazz.getSimpleName());
+                        ioc.put(simpleName, instance);
+                    }
+                    //被Service标记的
+                    else if (clazz.isAnnotationPresent(WCJService.class)) {
+                        //处理可能在不同包下出现相同的类名，根据@Service("")中的名字区分
+                        String beanName = clazz.getAnnotation(WCJService.class).value();
+                        if (StringUtils.isEmpty(beanName)) {
+                            beanName = toLowerCase(clazz.getSimpleName());
+                        }
+                        Object instance = clazz.newInstance();
+                        ioc.put(beanName, instance);
+                        //如果接口中有多个实现类，只加载其中一个
+                        for (Class interfaces : clazz.getInterfaces()) {
+                            if (ioc.containsKey(interfaces.getName())) {
+                                continue;
+                            }
+                            ioc.put(interfaces.getName(), instance);
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
         }
     }
 
@@ -130,7 +155,6 @@ public class WCJDispatcherServlet extends HttpServlet {
                             String url = method.getAnnotation(WCJRequestMapping.class).value();
                             url = ("/" + baseUrl + "/" + url).replaceAll("/+", "/");
                             handlerMapping.put(url, method);
-                            System.out.println("handlerMapping:" + url + ":" + method);
                         }
                     }
                 }
@@ -150,8 +174,8 @@ public class WCJDispatcherServlet extends HttpServlet {
                             beanName = field.getType().getName();
                         }
                         field.setAccessible(true);
+                        //给对象的字段赋值
                         field.set(entry.getValue(), ioc.get(beanName));
-                        System.out.println("field DI:" + entry.getValue() + ":" + beanName);
                     }
                 }
             }
@@ -160,9 +184,9 @@ public class WCJDispatcherServlet extends HttpServlet {
 
     private void doScannerPackage(String property) {
         //包路径本质就是文件夹，需要将com.wcj.v1替换com/wcj/v1
-        property = property.replaceAll("\\.", "/");
+        String packageUrl = property.replaceAll("\\.", "/");
         //getResource返回URI
-        URL url = this.getClass().getClassLoader().getResource(property);
+        URL url = this.getClass().getClassLoader().getResource(packageUrl);
         File file = new File(url.getFile());
         //遍历所有目录，如果是目录，递归，限制只扫描.class结尾的类文件，用于反射
         for (File f : file.listFiles()) {
@@ -171,8 +195,8 @@ public class WCJDispatcherServlet extends HttpServlet {
             } else {
                 if (!f.getName().endsWith(".class"))
                     continue;
-                className.add(f.getName());
-                System.out.println("ScannerPackage className:" + f.getName());
+                //全限定类名
+                className.add(property + "." + f.getName().replaceAll("\\.class", ""));
             }
         }
     }
